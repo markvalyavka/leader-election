@@ -118,7 +118,8 @@ def handle_log_chat_msg(params, from_):
 
 def handle_send_chat_msg(params, from_):
     if node_id == L:
-        logging.info(f"[{from_}]: {params['chat_msg']}\n")
+        sender = from_ if from_ else node_id
+        logging.info(f"[{sender}]: {params['chat_msg']}\n")
         unreachable_node = None
         for node in cluster_nodes:
             try:
@@ -127,7 +128,7 @@ def handle_send_chat_msg(params, from_):
                         "msg_type": "log_chat_msg",
                         "from": node_id,
                         "params": {
-                            "sender": from_,
+                            "sender": sender,
                             "chat_msg": params["chat_msg"]
                         }
                     })
@@ -147,13 +148,18 @@ def handle_send_chat_msg(params, from_):
 
     elif node_id != L:
         logging.info(f"[{node_id}]: {params['chat_msg']}\n")
-        requests.post(f"http://0.0.0.0:{L}", json={
-            "msg_type": "send_chat_msg",
-            "from": node_id,
-            "params": {
-                "chat_msg": params["chat_msg"]
-            }
-        })
+        try:
+            requests.post(f"http://0.0.0.0:{L}", json={
+                "msg_type": "send_chat_msg",
+                "from": node_id,
+                "params": {
+                    "chat_msg": params["chat_msg"]
+                }
+            })
+        except requests.ConnectionError:
+            print("Starting a new election")
+            handle_election({"node_ids": []}, None)
+
 
 def handle_dead_node_detected(params, from_):
     dead_node = params["dead_node"]
@@ -173,13 +179,16 @@ def handle_dead_node_detected(params, from_):
 def remove_n_and_repair(params, from_):
     global N, NN, P, L, cluster_nodes
     # Step 0
-    requests.post(f"http://0.0.0.0:{L}", json={
-        "msg_type": "deregister_node",
-        "from": node_id,
-        "params": {
-            "removed_node": N
-        }
-    })
+    try:
+        requests.post(f"http://0.0.0.0:{L}", json={
+            "msg_type": "deregister_node",
+            "from": node_id,
+            "params": {
+                "removed_node": N
+            }
+        })
+    except requests.ConnectionError:
+        pass
     # Step 1
     prev_N = N
     prev_NN = NN
@@ -210,6 +219,69 @@ def remove_n_and_repair(params, from_):
             "NN": N
         }
     })
+
+def handle_election(params, from_):
+    global L
+    if node_id in params["node_ids"]:
+        # start elected
+        new_leader = max(params["node_ids"])
+        # L = new_leader
+        handle_elected({"L": new_leader}, None)
+    else:
+        print("Passing election to next")
+        print("curr ids", params["node_ids"])
+        params["node_ids"].append(node_id)
+        try:
+            requests.post(f"http://0.0.0.0:{N}", json={
+                "msg_type": "election",
+                "from": node_id,
+                "params": {
+                    "node_ids": params["node_ids"]
+                }
+            })
+        except requests.ConnectionError:
+            cur_state = {
+                "Node": node_id,
+                "N": N,
+                "NN": NN,
+                "P": P,
+                "L": L,
+                "cluster_nodes": cluster_nodes
+            }
+            print("Before repair", cur_state)
+            remove_n_and_repair(params, from_)
+            print("HEYAA")
+            requests.post(f"http://0.0.0.0:{N}", json={
+                "msg_type": "election",
+                "from": node_id,
+                "params": {
+                    "node_ids": params["node_ids"]
+                }
+            })
+
+def handle_elected(params, from_):
+    print("starting elected with ", params["L"])
+    global L
+    new_leader = params["L"]
+    if L == new_leader:
+        return
+    else:
+        L = new_leader
+        if not node_id == L:
+            requests.post(f"http://0.0.0.0:{L}", json={
+                "msg_type": "register_node",
+                "from": node_id,
+                "params": {
+                    "new_node": node_id
+                }
+            })
+        requests.post(f"http://0.0.0.0:{N}", json={
+            "msg_type": "elected",
+            "from": node_id,
+            "params": {
+                "L": L
+            }
+        })
 
 
 class NodeRequestHandler(BaseHTTPRequestHandler):
@@ -262,6 +334,8 @@ class NodeRequestHandler(BaseHTTPRequestHandler):
             "log_chat_msg": handle_log_chat_msg,
             "remove_next_from_outside": remove_n_and_repair,
             "dead_node_detected": handle_dead_node_detected,
+            "election": handle_election,
+            "elected": handle_elected,
         }
         msg_type_to_handler[msg_type](params, from_)
 
