@@ -4,12 +4,13 @@ Very simple HTTP server in python for logging requests
 Usage::
     ./server.py [<port>]
 """
-from http.server import BaseHTTPRequestHandler, HTTPServer
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import logging
 import json
 import threading
 import requests
 import argparse
+
 
 logging.basicConfig(level=logging.INFO)
 
@@ -86,6 +87,11 @@ def handle_register_node(params, from_):
     if node_id == L:
         cluster_nodes.append(params["new_node"])
 
+def handle_deregister_node(params, from_):
+    if node_id == L:
+        print("Removed node:", params["removed_node"])
+        cluster_nodes.remove(params["removed_node"])
+
 def handle_change_p(params, from_):
     global P
     P = params["P"]
@@ -113,16 +119,32 @@ def handle_log_chat_msg(params, from_):
 def handle_send_chat_msg(params, from_):
     if node_id == L:
         logging.info(f"[{from_}]: {params['chat_msg']}\n")
+        unreachable_node = None
         for node in cluster_nodes:
-            if node != from_:
-                requests.post(f"http://0.0.0.0:{node}", json={
-                    "msg_type": "log_chat_msg",
+            try:
+                if node != from_:
+                    requests.post(f"http://0.0.0.0:{node}", json={
+                        "msg_type": "log_chat_msg",
+                        "from": node_id,
+                        "params": {
+                            "sender": from_,
+                            "chat_msg": params["chat_msg"]
+                        }
+                    })
+            except requests.ConnectionError:
+                unreachable_node = node
+        if unreachable_node is not None:
+            if unreachable_node == N:
+                remove_n_and_repair(params, from_)
+            else:
+                requests.post(f"http://0.0.0.0:{N}", json={
+                    "msg_type": "dead_node_detected",
                     "from": node_id,
                     "params": {
-                        "sender": from_,
-                        "chat_msg": params["chat_msg"]
+                        "dead_node": unreachable_node
                     }
                 })
+
     elif node_id != L:
         logging.info(f"[{node_id}]: {params['chat_msg']}\n")
         requests.post(f"http://0.0.0.0:{L}", json={
@@ -133,18 +155,61 @@ def handle_send_chat_msg(params, from_):
             }
         })
 
+def handle_dead_node_detected(params, from_):
+    dead_node = params["dead_node"]
+    if N == dead_node:
+        print(f"Repairing on {node_id}")
+        remove_n_and_repair(params, from_)
+    else:
+        requests.post(f"http://0.0.0.0:{N}", json={
+            "msg_type": "dead_node_detected",
+            "from": node_id,
+            "params": {
+                "dead_node": dead_node
+            }
+        })
+
 
 def remove_n_and_repair(params, from_):
-    global N, NN
+    global N, NN, P, L, cluster_nodes
+    # Step 0
+    requests.post(f"http://0.0.0.0:{L}", json={
+        "msg_type": "deregister_node",
+        "from": node_id,
+        "params": {
+            "removed_node": N
+        }
+    })
     # Step 1
     prev_N = N
     prev_NN = NN
     N = NN
 
-    my_new_NN = requests.get(f"http://0.0.0.0:{NN}/n")
-    print("my new NN ", my_new_NN)
+    if NN == node_id:
+        N = NN = P = L = node_id
+        cluster_nodes = []
+        return
 
+    # Step 2
+    my_new_NN = requests.get(f"http://0.0.0.0:{NN}/n").text
+    NN = int(my_new_NN)
 
+    requests.post(f"http://0.0.0.0:{N}", json={
+        "msg_type": "change_p",
+        "from": node_id,
+        "params": {
+            "P": node_id
+        }
+    })
+
+    # Step 3
+    requests.post(f"http://0.0.0.0:{P}", json={
+        "msg_type": "change_nn",
+        "from": node_id,
+        "params": {
+            "NN": N
+        }
+    })
 
 
 class NodeRequestHandler(BaseHTTPRequestHandler):
@@ -157,12 +222,21 @@ class NodeRequestHandler(BaseHTTPRequestHandler):
             self.send_response(200)
             self.send_header('Content-type', 'text/html')
             self.end_headers()
-            self.wfile.write(f"My new N {N}".encode('utf-8'))
+            self.wfile.write(f"{N}".encode('utf-8'))
         else:
             self.send_response(200)
-            self.send_header('Content-type', 'text/html')
+            self.send_header('Content-type', 'application/json')
             self.end_headers()
-            self.wfile.write(f"[Node - {node_id}]: N - {N}, NN - {NN}, P - {P}, L - {L}, cluster - {cluster_nodes}!".encode('utf-8'))
+            cur_state = {
+                "Node": node_id,
+                "N": N,
+                "NN": NN,
+                "P": P,
+                "L": L,
+                "cluster_nodes": cluster_nodes
+            }
+            self.wfile.write(json.dumps(cur_state).encode('utf-8'))
+            # self.wfile.write(f"[Node - {node_id}]: N - {N}, NN - {NN}, P - {P}, L - {L}, cluster - {cluster_nodes}!".encode('utf-8'))
 
     def do_POST(self):
         # Read POST body.
@@ -183,13 +257,15 @@ class NodeRequestHandler(BaseHTTPRequestHandler):
             "log_state": handle_log_state,
             "change_nn": handle_change_nn,
             "register_node": handle_register_node,
+            "deregister_node": handle_deregister_node,
             "send_chat_msg": handle_send_chat_msg,
             "log_chat_msg": handle_log_chat_msg,
             "remove_next_from_outside": remove_n_and_repair,
+            "dead_node_detected": handle_dead_node_detected,
         }
         msg_type_to_handler[msg_type](params, from_)
 
-def run(server_class=HTTPServer, handler_class=NodeRequestHandler, port=8080):
+def run(server_class=ThreadingHTTPServer, handler_class=NodeRequestHandler, port=8080):
     server_address = ('', port)
     httpd = server_class(server_address, handler_class)
     logging.info(f'[STARTING] A node at {httpd.server_address[0]}:{httpd.server_address[1]}.')
