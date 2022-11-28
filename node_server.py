@@ -24,6 +24,15 @@ def log_message(msg, sender, color=""):
     logging.info(f"[{sender}]: {msg}\n")
 
 
+def get_current_state():
+    return {
+        "Node": node_id,
+        "N": N,
+        "NN": NN,
+        "P": P,
+        "L": L,
+        "cluster_nodes": cluster_nodes
+    }
 # class ClusterNode:
 #
 #     def __init__(self, node_id, nickname):
@@ -133,11 +142,9 @@ def handle_send_chat_msg(params, from_):
 
     if node_id == L:
         log_message(params['chat_msg'], sender)
-        # logging.info(f"[{sender}]: {params['chat_msg']}\n")
         unreachable_node = None
         for node in cluster_nodes:
             try:
-                # if node != from_:
                 requests.post(f"http://0.0.0.0:{node}", json={
                     "msg_type": "log_chat_msg",
                     "from": node_id,
@@ -161,7 +168,6 @@ def handle_send_chat_msg(params, from_):
                         "dead_node": unreachable_node
                     }
                 })
-
     elif node_id != L:
         try:
             requests.post(f"http://0.0.0.0:{L}", json={
@@ -172,10 +178,11 @@ def handle_send_chat_msg(params, from_):
                     "sender": sender
                 }
             })
-            # logging.info(f"[{node_id}]: {params['chat_msg']}\n")
         except requests.ConnectionError:
             print("Starting a new election")
-            handle_election({"node_ids": [], "msg_to_retry": params["chat_msg"], "sender": sender}, None)
+            handle_election({"node_ids": [],
+                             "msg_to_retry": params["chat_msg"],
+                             "sender": sender}, None)
 
 
 def handle_dead_node_detected(params, from_):
@@ -281,7 +288,6 @@ def handle_election(params, from_):
 def handle_elected(params, from_):
     # print("starting elected with ", params["L"])
     global L
-    # logging.info(f"[{params['sender']}]: {params['msg_to_retry']}\n")
     log_message(params['msg_to_retry'], params['sender'])
     if L != params["L"]:
         # If L hasn't already been updated – update it.
@@ -323,14 +329,7 @@ class NodeRequestHandler(BaseHTTPRequestHandler):
         self.send_response(200)
         self.send_header('Content-type', 'application/json')
         self.end_headers()
-        cur_state = {
-            "Node": node_id,
-            "N": N,
-            "NN": NN,
-            "P": P,
-            "L": L,
-            "cluster_nodes": cluster_nodes
-        }
+        cur_state = get_current_state()
         self.wfile.write(json.dumps(cur_state).encode('utf-8'))
 
     def do_POST(self):
