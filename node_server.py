@@ -84,8 +84,8 @@ def handle_join(params, from_):
 
 
 def handle_register_node(params, from_):
-    if node_id == L:
-        cluster_nodes.append(params["new_node"])
+
+    cluster_nodes.append(params["new_node"])
 
 def handle_deregister_node(params, from_):
     if node_id == L:
@@ -117,8 +117,8 @@ def handle_log_chat_msg(params, from_):
     logging.info(f"[{params['sender']}]: {params['chat_msg']}\n")
 
 def handle_send_chat_msg(params, from_):
+    sender = params.get("sender", node_id)
     if node_id == L:
-        sender = from_ if from_ else node_id
         logging.info(f"[{sender}]: {params['chat_msg']}\n")
         unreachable_node = None
         for node in cluster_nodes:
@@ -147,18 +147,20 @@ def handle_send_chat_msg(params, from_):
                 })
 
     elif node_id != L:
-        logging.info(f"[{node_id}]: {params['chat_msg']}\n")
+
         try:
             requests.post(f"http://0.0.0.0:{L}", json={
                 "msg_type": "send_chat_msg",
                 "from": node_id,
                 "params": {
-                    "chat_msg": params["chat_msg"]
+                    "chat_msg": params["chat_msg"],
+                    "sender": sender
                 }
             })
+            logging.info(f"[{node_id}]: {params['chat_msg']}\n")
         except requests.ConnectionError:
             print("Starting a new election")
-            handle_election({"node_ids": []}, None)
+            handle_election({"node_ids": [], "msg_to_retry": params["chat_msg"], "sender": sender}, None)
 
 
 def handle_dead_node_detected(params, from_):
@@ -226,7 +228,7 @@ def handle_election(params, from_):
         # start elected
         new_leader = max(params["node_ids"])
         # L = new_leader
-        handle_elected({"L": new_leader}, None)
+        handle_elected({"L": new_leader, "msg_to_retry": params["msg_to_retry"], "sender": params["sender"]}, None)
     else:
         print("Passing election to next")
         print("curr ids", params["node_ids"])
@@ -236,7 +238,9 @@ def handle_election(params, from_):
                 "msg_type": "election",
                 "from": node_id,
                 "params": {
-                    "node_ids": params["node_ids"]
+                    "node_ids": params["node_ids"],
+                    "msg_to_retry": params["msg_to_retry"],
+                    "sender": params["sender"],
                 }
             })
         except requests.ConnectionError:
@@ -248,26 +252,31 @@ def handle_election(params, from_):
                 "L": L,
                 "cluster_nodes": cluster_nodes
             }
-            print("Before repair", cur_state)
+
             remove_n_and_repair(params, from_)
-            print("HEYAA")
+
             requests.post(f"http://0.0.0.0:{N}", json={
                 "msg_type": "election",
                 "from": node_id,
                 "params": {
-                    "node_ids": params["node_ids"]
+                    "node_ids": params["node_ids"],
+                    "msg_to_retry": params["msg_to_retry"],
+                    "sender": params["sender"],
                 }
             })
+
 
 def handle_elected(params, from_):
     print("starting elected with ", params["L"])
     global L
     new_leader = params["L"]
+    logging.info(f"[{params['sender']}]: {params['msg_to_retry']}\n")
     if L == new_leader:
         return
     else:
         L = new_leader
         if not node_id == L:
+            print(f"{node_id} sent register to {L}")
             requests.post(f"http://0.0.0.0:{L}", json={
                 "msg_type": "register_node",
                 "from": node_id,
@@ -279,7 +288,9 @@ def handle_elected(params, from_):
             "msg_type": "elected",
             "from": node_id,
             "params": {
-                "L": L
+                "L": L,
+                "msg_to_retry": params["msg_to_retry"],
+                "sender": params["sender"],
             }
         })
 
@@ -308,7 +319,6 @@ class NodeRequestHandler(BaseHTTPRequestHandler):
                 "cluster_nodes": cluster_nodes
             }
             self.wfile.write(json.dumps(cur_state).encode('utf-8'))
-            # self.wfile.write(f"[Node - {node_id}]: N - {N}, NN - {NN}, P - {P}, L - {L}, cluster - {cluster_nodes}!".encode('utf-8'))
 
     def do_POST(self):
         # Read POST body.
@@ -338,6 +348,7 @@ class NodeRequestHandler(BaseHTTPRequestHandler):
             "elected": handle_elected,
         }
         msg_type_to_handler[msg_type](params, from_)
+
 
 def run(server_class=ThreadingHTTPServer, handler_class=NodeRequestHandler, port=8080):
     server_address = ('', port)

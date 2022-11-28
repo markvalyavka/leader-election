@@ -37,7 +37,8 @@ G = GraphVisualization()
 
 seen = set()
 nodes_list = []
-checked_node_id = 6000
+from sys import argv
+checked_node_id = argv[1] if len(argv) == 2 else 6000
 while checked_node_id not in seen:
     resp = requests.get(f"http://0.0.0.0:{checked_node_id}").json()
     nodes_list.append(resp["Node"])
