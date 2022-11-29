@@ -34,7 +34,6 @@ class GraphVisualization:
 
 # Driver code
 G = GraphVisualization()
-
 seen = set()
 nodes_list = []
 from sys import argv
